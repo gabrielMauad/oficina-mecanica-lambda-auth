@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  DOTNET_VERSION: "8.0.x"
+
+jobs:
+  # Status check exigido pela protecao da branch main — nome do job usado como required check.
+  build-and-test:
+    name: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restaurar dependencias
+        run: dotnet restore
+
+      - name: Build (Release)
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Testes (unitarios + integracao com Testcontainers)
+        run: dotnet test --configuration Release --no-build --logger "console;verbosity=normal"
+
+  # So roda apos merge na main, e depende do mesmo job de build/test acima.
+  package:
+    name: package
+    needs: build-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Publicar function
+        run: >
+          dotnet publish src/OficinaMecanica.LambdaAuth/OficinaMecanica.LambdaAuth.csproj
+          --configuration Release
+          --output publish/
+
+      - name: Empacotar zip de deploy
+        run: |
+          cd publish
+          zip -r ../oficina-mecanica-lambda-auth.zip .
+
+      - name: Publicar artefato do build
+        uses: actions/upload-artifact@v4
+        with:
+          name: oficina-mecanica-lambda-auth
+          path: oficina-mecanica-lambda-auth.zip
+          retention-days: 30
+
+  # TODO: job de deploy para a AWS. Fica desabilitado ate a infraestrutura existir — esta fase
+  # entrega apenas a Function; API Gateway, o segredo em Secrets Manager, a role de execucao da
+  # Lambda e o acesso de rede ao PostgreSQL sao construidos numa etapa de infraestrutura separada
+  # (fora do escopo deste repositorio). Quando essa infraestrutura existir, este job troca
+  # "if: false" por um gatilho real e usa "aws-actions/configure-aws-credentials" + "aws lambda
+  # update-function-code" (ou Terraform/CDK, a depender do que a fase de infra adotar).
+  # deploy:
+  #   name: deploy
+  #   needs: package
+  #   if: false
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Baixar artefato empacotado
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         name: oficina-mecanica-lambda-auth
+  #     - name: TODO — configurar credenciais AWS e publicar a function
+  #       run: echo "Deploy pendente de infraestrutura (API Gateway, role, secrets)."
