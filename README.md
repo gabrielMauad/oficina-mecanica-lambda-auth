@@ -35,12 +35,12 @@ aplicação:
    (`DocsBRValidator`) que o domínio `Cadastro` da aplicação usa em `Cpf.Criar`. Isso elimina o
    risco de as duas regras divergirem.
 2. **Consultar `cadastro.cliente` diretamente no PostgreSQL** — decisão do
-   [ADR-002](../oficina-mecanica-app/docs/arquitetura/adrs/002-lambda-le-o-banco-diretamente.md)
+   [ADR-002](https://github.com/gabrielMauad/oficina-mecanica-app/blob/main/docs/arquitetura/adrs/002-lambda-le-o-banco-diretamente.md)
    da aplicação: é uma exceção deliberada ao isolamento entre bounded contexts, restrita ao fluxo
    de autenticação. A Function só executa `SELECT` e usa um usuário de banco com permissão
    exclusiva de leitura nessa tabela.
 3. **Emitir um JWT HS256** assinado com um segredo simétrico compartilhado com a aplicação
-   ([ADR-001](../oficina-mecanica-app/docs/arquitetura/adrs/001-jwt-hs256-segredo-compartilhado.md)),
+   ([ADR-001](https://github.com/gabrielMauad/oficina-mecanica-app/blob/main/docs/arquitetura/adrs/001-jwt-hs256-segredo-compartilhado.md)),
    seguindo o contrato de claims do RFC-001 §4.1.
 
 CPF inválido, cliente inexistente e cliente inativo são as três respostas de erro. **Inexistente e
