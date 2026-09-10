@@ -5,7 +5,7 @@ pós-graduação em Arquitetura de Software (FIAP/SOAT), Fase 3.
 
 Este componente é um dos dois emissores de token do sistema (RFC-001 do repositório da aplicação):
 recebe um CPF, valida-o, consulta se existe um cliente ativo com esse documento e, em caso
-positivo, emite um JWT que a aplicação principal ([`oficina-mecanica-v2`](https://github.com/gabrielMauad/oficina-mecanica-v2))
+positivo, emite um JWT que a aplicação principal ([`oficina-mecanica-app`](https://github.com/gabrielMauad/oficina-mecanica-app))
 aceita para as rotas do papel `Cliente`.
 
 ---
@@ -35,12 +35,12 @@ aplicação:
    (`DocsBRValidator`) que o domínio `Cadastro` da aplicação usa em `Cpf.Criar`. Isso elimina o
    risco de as duas regras divergirem.
 2. **Consultar `cadastro.cliente` diretamente no PostgreSQL** — decisão do
-   [ADR-002](../oficina-mecanica-v2/docs/arquitetura/adrs/002-lambda-le-o-banco-diretamente.md)
+   [ADR-002](https://github.com/gabrielMauad/oficina-mecanica-app/blob/main/docs/arquitetura/adrs/002-lambda-le-o-banco-diretamente.md)
    da aplicação: é uma exceção deliberada ao isolamento entre bounded contexts, restrita ao fluxo
    de autenticação. A Function só executa `SELECT` e usa um usuário de banco com permissão
    exclusiva de leitura nessa tabela.
 3. **Emitir um JWT HS256** assinado com um segredo simétrico compartilhado com a aplicação
-   ([ADR-001](../oficina-mecanica-v2/docs/arquitetura/adrs/001-jwt-hs256-segredo-compartilhado.md)),
+   ([ADR-001](https://github.com/gabrielMauad/oficina-mecanica-app/blob/main/docs/arquitetura/adrs/001-jwt-hs256-segredo-compartilhado.md)),
    seguindo o contrato de claims do RFC-001 §4.1.
 
 CPF inválido, cliente inexistente e cliente inativo são as três respostas de erro. **Inexistente e
@@ -90,7 +90,7 @@ flowchart LR
     end
     GW -->|invoca| FN["Function de Autenticação<br/>(este repositório)"]
     FN -->|SELECT somente leitura| DB[(PostgreSQL<br/>schema cadastro)]
-    FN -->|assina com segredo compartilhado| APP[Aplicação oficina-mecanica-v2<br/>valida o mesmo JWT]
+    FN -->|assina com segredo compartilhado| APP[Aplicação oficina-mecanica-app<br/>valida o mesmo JWT]
 ```
 
 ## Pré-requisitos
