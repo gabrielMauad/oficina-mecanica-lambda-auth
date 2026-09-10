@@ -1,0 +1,14 @@
+{
+  "Information": [
+    "Este arquivo fornece valores padrao para o dotnet-lambda tool. Nenhum valor real de infraestrutura",
+    "(regiao, role, bucket de deploy) foi preenchido porque a infraestrutura ainda nao existe — ver README."
+  ],
+  "profile": "",
+  "region": "",
+  "configuration": "Release",
+  "framework": "net8.0",
+  "function-runtime": "dotnet8",
+  "function-memory-size": 256,
+  "function-timeout": 10,
+  "function-handler": "OficinaMecanica.LambdaAuth::OficinaMecanica.LambdaAuth.Function::FunctionHandler"
+}
