@@ -22,6 +22,7 @@ aceita para as rotas do papel `Cliente`.
 - [Exemplo de requisição e resposta](#exemplo-de-requisição-e-resposta)
 - [Pipeline (CI/CD)](#pipeline-cicd)
 - [Deploy](#deploy)
+- [Limitações conhecidas](#limitações-conhecidas)
 - [Decisões e pontos em aberto](#decisões-e-pontos-em-aberto)
 
 ---
@@ -58,6 +59,8 @@ verificador de cadastro de clientes.
 | **DocsBRValidator** | Mesmo pacote que `Cadastro.Domain.Cliente.Cpf` usa na aplicação para validar CPF. |
 | **xUnit** | Testes unitários. |
 | **Testcontainers.PostgreSql** | Testes de integração contra um PostgreSQL real. |
+| **Terraform** ≥ 1.5, provider `hashicorp/aws` ~> 5.0 | IaC da Lambda, seu security group e a integração/rota no API Gateway (pasta [`infra/`](infra/)) |
+| **GitHub Actions** | CI de build/teste/validação (PR) e package + apply (push/dispatch na `main`) |
 
 ## Diagrama do componente
 
@@ -85,10 +88,19 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    subgraph "Fora de escopo deste repositório"
-        GW[API Gateway]
+    subgraph "oficina-mecanica-infra-k8s"
+        GW["API Gateway<br/>(HTTP API compartilhada)"]
     end
-    GW -->|invoca| FN["Function de Autenticação<br/>(este repositório)"]
+    subgraph "oficina-mecanica-lambda-auth (infra/)"
+        ROUTE["Rota POST /auth/cpf<br/>(acrescentada nesta API)"]
+        SG["Security group da Lambda<br/>(VPC, sem acesso a internet)"]
+        FN["Function de Autenticação"]
+    end
+    subgraph "oficina-mecanica-infra-db"
+        RDSSG["Security group do RDS<br/>(libera 5432 a partir de SG acima)"]
+    end
+    GW --> ROUTE --> FN
+    FN -.na VPC via.-> SG -.libera 5432 em.-> RDSSG
     FN -->|SELECT somente leitura| DB[(PostgreSQL<br/>schema cadastro)]
     FN -->|assina com segredo compartilhado| APP[Aplicação oficina-mecanica-app<br/>valida o mesmo JWT]
 ```
@@ -113,10 +125,16 @@ hardcoded no repositório:
 | `JWT_AUDIENCE` | `oficina-mecanica-api`. |
 | `DB_CONNECTION_STRING` | String de conexão Npgsql para o PostgreSQL da aplicação. |
 
-Na nuvem, esses quatro valores devem vir do **AWS Secrets Manager** (injetados como variável de
-ambiente da Lambda a partir de um secret, não digitados na configuração da function). O
-`DB_CONNECTION_STRING` deve apontar para um **usuário de banco com permissão apenas de `SELECT`**
-em `cadastro.cliente` — nunca o usuário de aplicação, que tem escrita.
+Na nuvem (Terraform em [`infra/`](infra/)), esses quatro valores são **resolvidos pelo Terraform no
+apply**, a partir dos secrets `oficina-mecanica/dev/rds/postgresql`
+(`oficina-mecanica-infra-db`) e `oficina-mecanica/dev/app` (`oficina-mecanica-infra-k8s`), lidos
+por **nome** via `data "aws_secretsmanager_secret_version"`, e gravados como variáveis de ambiente
+da function (`infra/lambda.tf`). **Não é a Lambda que busca o segredo em runtime** — ver
+[Limitações conhecidas](#limitações-conhecidas) para o motivo (a VPC desta conta não tem NAT
+Gateway) e a consequência (os valores ficam na configuração da function e no state do Terraform).
+
+`DB_CONNECTION_STRING` inclui `SSL Mode=Require` — o RDS PostgreSQL 16 desta conta exige TLS por
+padrão (`rds.force_ssl = 1`); sem isso a conexão é recusada.
 
 ## Execução local
 
@@ -203,27 +221,102 @@ Content-Type: application/json
 
 ## Pipeline (CI/CD)
 
-Workflow em `.github/workflows/ci.yml`, GitHub Actions:
+Workflow em [`.github/workflows/ci.yml`](.github/workflows/ci.yml), GitHub Actions:
 
-- **Em Pull Request**: restore, build e testes (unitários + integração com Testcontainers, Docker
-  já vem disponível nos runners `ubuntu-latest`). Este job (`build-and-test`) é o **status check
+- **`build-and-test`** (todo Pull Request e push): restore, build e testes (unitários + integração
+  com Testcontainers, Docker já vem disponível nos runners `ubuntu-latest`). **Status check
   obrigatório** da branch `main`.
-- **Em push na `main`** (após merge do PR): repete build e testes e, adicionalmente, publica a
-  function (`dotnet publish`) e empacota o resultado em um `.zip`, disponibilizado como artefato
-  do workflow — pronto para um futuro `aws lambda update-function-code`.
-- **Deploy para a AWS**: job comentado no workflow. Depende de infraestrutura (API Gateway, role
-  de execução da Lambda, secret no Secrets Manager, acesso de rede ao PostgreSQL) que ainda não
-  existe e é responsabilidade de outro repositório/etapa. O comentário no workflow documenta o que
-  falta para ativá-lo.
+- **`terraform-validate`** (todo Pull Request e push): `terraform fmt -check`, `terraform init
+  -backend=false` e `terraform validate` em [`infra/`](infra/) — não exige credenciais AWS.
+- **`package`** (push na `main` ou `workflow_dispatch`, depende de `build-and-test`): publica a
+  function (`dotnet publish`) e empacota o resultado em `oficina-mecanica-lambda-auth.zip`,
+  disponibilizado como artefato do workflow.
+- **`deploy`** (push na `main` ou `workflow_dispatch`, depende de `terraform-validate` e
+  `package`): baixa o zip empacotado, autentica com `aws-actions/configure-aws-credentials`
+  (**credenciais de sessão temporárias** da conta AWS Academy — não OIDC/IAM role, que esta conta
+  não permite criar, ADR-006) e roda `terraform init` + `terraform apply` em `infra/`, publicando
+  a Lambda, o security group e a rota no API Gateway. Termina com um smoke test: descobre o
+  endpoint da API pelo **nome** (`aws apigatewayv2 get-apis`) e faz `POST /auth/cpf` com um CPF
+  válido porém inexistente, esperando **401** — um 504 nessa etapa indica problema de rede entre a
+  Lambda e o RDS, não falta de dado.
+- As credenciais de sessão expiram com a sessão do laboratório: se `deploy` falhar na
+  autenticação, é preciso renovar os três secrets e reexecutar via `workflow_dispatch` — não é
+  pipeline quebrada (ADR-006).
 
 ## Deploy
 
-Fora do escopo deste repositório (ver [Fora de escopo](#decisões-e-pontos-em-aberto)). O artefato
-gerado pela pipeline (`oficina-mecanica-lambda-auth.zip`) é o que uma etapa de infraestrutura
-publicaria com `aws lambda create-function`/`update-function-code`, usando o handler configurado
-em `src/OficinaMecanica.LambdaAuth/aws-lambda-tools-defaults.json`
-(`OficinaMecanica.LambdaAuth::OficinaMecanica.LambdaAuth.Function::FunctionHandler`) e o runtime
-gerenciado `dotnet8`.
+O Terraform em [`infra/`](infra/) provisiona a `aws_lambda_function`, o security group da Lambda
+na VPC (necessário para alcançar o RDS, que não é público — ADR-002) e a integração/rota
+`POST /auth/cpf` na HTTP API já criada por `oficina-mecanica-infra-k8s`. Ver os comentários em cada
+arquivo de `infra/` para o desenho completo.
+
+### Ordem de deploy
+
+Este repositório **depende** de `oficina-mecanica-infra-k8s` (VPC, subnets, a própria HTTP API) e
+`oficina-mecanica-infra-db` (security group do RDS) já aplicados — ele lê os states deles via
+`terraform_remote_state`. Ordem de merge/apply completa:
+
+```
+oficina-mecanica-infra-k8s → oficina-mecanica-infra-db → oficina-mecanica-app → oficina-mecanica-lambda-auth
+```
+
+A Lambda vem depois da aplicação porque o fluxo completo de login por CPF só é demonstrável depois
+que as migrations da aplicação criarem `cadastro.cliente` no RDS.
+
+### Pré-requisitos de execução
+
+- [Terraform](https://developer.hashicorp.com/terraform/downloads) ≥ 1.5 (mesma versão usada nos
+  outros dois repositórios de infraestrutura).
+- Uma sessão ativa da AWS Academy Learner Lab, com as credenciais de sessão exportadas.
+- O mesmo bucket S3 do state compartilhado (`TF_STATE_BUCKET`) usado por `oficina-mecanica-infra-k8s`
+  e `oficina-mecanica-infra-db`, já com os states deles aplicados.
+- O zip de deploy publicado (`dotnet publish` + `zip`, job `package` do workflow).
+
+### Instruções de execução (Terraform)
+
+```bash
+cd infra
+
+terraform init \
+  -backend-config="bucket=<mesmo-bucket-compartilhado>" \
+  -backend-config="key=lambda-auth/terraform.tfstate" \
+  -backend-config="region=us-east-1"
+
+terraform apply \
+  -var="tf_state_bucket=<mesmo-bucket-compartilhado>" \
+  -var="lambda_zip_path=<caminho-do-zip-publicado>"
+```
+
+### Descobrir a URL de autenticação
+
+Nunca fica hardcoded (muda a cada recriação da infraestrutura) — descubra pelo **nome** da API:
+
+```bash
+aws apigatewayv2 get-apis \
+  --query "Items[?Name=='oficina-mecanica-api'].ApiEndpoint | [0]" \
+  --output text
+```
+
+A rota de autenticação é `POST <endpoint>/auth/cpf`.
+
+## Limitações conhecidas
+
+- **A Lambda usa as credenciais do secret do RDS, não um usuário somente-leitura dedicado.**
+  [ADR-002](https://github.com/gabrielMauad/oficina-mecanica-app/blob/main/docs/arquitetura/adrs/002-lambda-le-o-banco-diretamente.md)
+  da aplicação prevê um usuário de banco dedicado, com permissão apenas de `SELECT` em
+  `cadastro.cliente`. Criá-lo exige executar SQL (`CREATE USER`/`GRANT`) **dentro da VPC**, já que
+  o RDS não é público — o que não é viável a partir do runner do GitHub Actions nesta etapa (não
+  há um túnel/bastion provisionado para isso). Por isso, nesta etapa, `infra/lambda.tf` usa as
+  mesmas credenciais (`username`/`password`) do secret `oficina-mecanica/dev/rds/postgresql` que a
+  aplicação usa — a Lambda tem, na prática, permissão de escrita que nunca exerce (só faz
+  `SELECT`, ver `ClienteRepository.cs`). Registrado como nota de execução no próprio ADR-002.
+- **Os segredos de runtime da Lambda ficam na configuração da function e no state do Terraform.**
+  A VPC desta conta AWS Academy não tem NAT Gateway (RFC-002), então a Lambda dentro da VPC não
+  alcança o Secrets Manager em tempo de execução. A única forma possível aqui é resolver os
+  segredos **no apply**, via `data "aws_secretsmanager_secret_version"`, e gravá-los como variável
+  de ambiente da function (`infra/lambda.tf`). Consequência aceita: quem tiver acesso de leitura ao
+  state do Terraform ou à configuração da function no console vê os valores em texto puro — mesmo
+  nível de exposição que qualquer variável de ambiente de Lambda, mas vale registrar.
 
 ## Decisões e pontos em aberto
 
@@ -246,6 +339,8 @@ gerenciado `dotnet8`.
   isso exigiria que este repositório dependesse do pacote de migrations publicado pela aplicação
   (ou de acesso ao código-fonte dela em CI), o que foi considerado fora de escopo nesta primeira
   versão.
-- **Fora de escopo** (por decisão explícita do RFC-001 e do enunciado da fase): API Gateway,
-  Terraform ou qualquer outro recurso de infraestrutura AWS; endpoint de refresh token; cadastro
-  de cliente; qualquer alteração no repositório da aplicação.
+- **Fora de escopo** (por decisão explícita do RFC-001 e do enunciado da fase): endpoint de
+  refresh token; cadastro de cliente; qualquer alteração no repositório da aplicação. A HTTP API
+  em si (recurso `aws_apigatewayv2_api`) continua fora deste repositório — pertence a
+  `oficina-mecanica-infra-k8s`; este repositório só acrescenta sua própria integração/rota nela
+  (`infra/apigateway.tf`).
