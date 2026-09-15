@@ -219,6 +219,20 @@ Content-Type: application/json
 }
 ```
 
+**Documentação da API completa.** Esta Function não tem Swagger/OpenAPI própria — é uma única
+rota simples, documentada acima. Para o restante da API (as rotas protegidas pelo token que esta
+Function emite), o repositório `oficina-mecanica-app` publica:
+
+- A [collection Bruno](https://github.com/gabrielMauad/oficina-mecanica-app/blob/main/docs/guias/collection_bruno.yml)
+  com todos os endpoints da aplicação — inclui a rota de login da oficina (`POST /auth/login`,
+  papel `Oficina`), mas **não** inclui uma requisição para `POST /auth/cpf` desta Function (a
+  collection tem um comentário explicando como gerar manualmente um token de papel `Cliente`
+  enquanto isso).
+- **Scalar/OpenAPI** (`<endpoint>/scalar`), servido pela própria aplicação atrás do **mesmo** API
+  Gateway desta Lambda — descubra `<endpoint>` com o comando `aws apigatewayv2 get-apis` da seção
+  "Descobrir a URL de autenticação" abaixo (é o mesmo endpoint de `POST /auth/cpf`, só troca o
+  caminho).
+
 ## Pipeline (CI/CD)
 
 Workflow em [`.github/workflows/ci.yml`](.github/workflows/ci.yml), GitHub Actions:
