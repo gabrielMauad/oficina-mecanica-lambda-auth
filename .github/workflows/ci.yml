@@ -5,9 +5,11 @@ on:
     branches: [main]
   push:
     branches: [main]
+  workflow_dispatch:
 
 env:
   DOTNET_VERSION: "8.0.x"
+  TERRAFORM_VERSION: "1.15.8"
 
 jobs:
   # Status check exigido pela protecao da branch main — nome do job usado como required check.
@@ -31,11 +33,36 @@ jobs:
       - name: Testes (unitarios + integracao com Testcontainers)
         run: dotnet test --configuration Release --no-build --logger "console;verbosity=normal"
 
-  # So roda apos merge na main, e depende do mesmo job de build/test acima.
+  # Validacao estatica do Terraform em infra/ - roda em todo PR, nao exige credenciais AWS.
+  # Mesma versao do Terraform usada em oficina-mecanica-infra-k8s e oficina-mecanica-infra-db.
+  terraform-validate:
+    name: terraform-validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Format Check
+        working-directory: infra
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        working-directory: infra
+        run: terraform validate
+
+  # So roda apos merge na main (ou workflow_dispatch), e depende do build/test acima.
   package:
     name: package
     needs: build-and-test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,22 +90,88 @@ jobs:
           path: oficina-mecanica-lambda-auth.zip
           retention-days: 30
 
-  # TODO: job de deploy para a AWS. Fica desabilitado ate a infraestrutura existir — esta fase
-  # entrega apenas a Function; API Gateway, o segredo em Secrets Manager, a role de execucao da
-  # Lambda e o acesso de rede ao PostgreSQL sao construidos numa etapa de infraestrutura separada
-  # (fora do escopo deste repositorio). Quando essa infraestrutura existir, este job troca
-  # "if: false" por um gatilho real e usa "aws-actions/configure-aws-credentials" + "aws lambda
-  # update-function-code" (ou Terraform/CDK, a depender do que a fase de infra adotar).
-  # deploy:
-  #   name: deploy
-  #   needs: package
-  #   if: false
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Baixar artefato empacotado
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: oficina-mecanica-lambda-auth
-  #     - name: TODO — configurar credenciais AWS e publicar a function
-  #       run: echo "Deploy pendente de infraestrutura (API Gateway, role, secrets)."
+  # Provisiona/atualiza a Lambda, o security group na VPC e a rota no API Gateway (infra/), e
+  # publica o zip empacotado pelo job "package". Credenciais: a conta e uma AWS Academy Learner
+  # Lab, que nao permite criar IAM role nem OIDC provider (ADR-006, repositorio
+  # oficina-mecanica-app) - por isso usa as tres credenciais de sessao temporarias como secrets,
+  # renovadas manualmente a cada sessao do laboratorio. workflow_dispatch existe especificamente
+  # para reexecutar o apply apos renovar essas credenciais, sem precisar de um commit novo.
+  deploy:
+    name: deploy
+    needs: [terraform-validate, package]
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: aws-academy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Baixar artefato empacotado
+        uses: actions/download-artifact@v4
+        with:
+          name: oficina-mecanica-lambda-auth
+          path: infra/
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      # Backend parcial (ver infra/backend.tf): bucket/key/region entram aqui, nao no codigo.
+      - name: Terraform Init
+        working-directory: infra
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=lambda-auth/terraform.tfstate" \
+            -backend-config="region=us-east-1"
+
+      - name: Terraform Apply
+        working-directory: infra
+        run: |
+          terraform apply -auto-approve -input=false \
+            -var="tf_state_bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -var="lambda_zip_path=oficina-mecanica-lambda-auth.zip"
+
+      # Descobre a URL da API pelo NOME (nunca endereco fixo - ela muda a cada recriacao da
+      # infraestrutura) e chama a rota de autenticacao com um CPF valido porem inexistente,
+      # esperando 401. Prova que API Gateway, Lambda, VPC e conexao com o RDS funcionam de ponta
+      # a ponta, sem depender de nenhum cliente cadastrado. Um 504 aqui indica problema de rede
+      # entre a Lambda e o RDS (SG, subnet ou credencial errada), nao um problema de dado.
+      - name: Smoke test (POST /auth/cpf via API Gateway)
+        run: |
+          API_ENDPOINT=$(aws apigatewayv2 get-apis \
+            --query "Items[?Name=='oficina-mecanica-api'].ApiEndpoint | [0]" \
+            --output text)
+
+          if [ -z "$API_ENDPOINT" ] || [ "$API_ENDPOINT" == "None" ]; then
+            echo "FALHA: nao foi possivel resolver o endpoint da API 'oficina-mecanica-api'."
+            exit 1
+          fi
+
+          echo "Endpoint resolvido: $API_ENDPOINT"
+
+          # CPF com digitos verificadores validos (passa em CpfValidationTests), usado como
+          # "inexistente" em test/OficinaMecanica.LambdaAuth.IntegrationTests/ClienteRepositoryTests.cs.
+          HTTP_STATUS=$(curl -sS -o /tmp/response.json -w "%{http_code}" \
+            -X POST "$API_ENDPOINT/auth/cpf" \
+            -H "Content-Type: application/json" \
+            -d '{"cpf":"111.222.333-96"}')
+
+          echo "Resposta:"; cat /tmp/response.json; echo
+          echo "Status HTTP: $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" != "401" ]; then
+            echo "FALHA: esperado 401 (cpf valido porem inexistente), recebido $HTTP_STATUS."
+            echo "504 costuma indicar problema de rede entre a Lambda e o RDS (SG/subnet/credencial)."
+            exit 1
+          fi
+
+          echo "OK: 401 recebido - API Gateway, Lambda, VPC e conexao com o RDS funcionando."
