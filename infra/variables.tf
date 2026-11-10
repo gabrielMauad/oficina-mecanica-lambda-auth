@@ -6,9 +6,9 @@ variable "aws_region" {
 
 variable "tf_state_bucket" {
   description = <<-EOT
-    Bucket S3 onde estão os states remotos de oficina-mecanica-infra-k8s e
-    oficina-mecanica-infra-db (mesmo bucket compartilhado dos três repositórios de
-    infraestrutura). Sem default de propósito: não hardcodar nome de bucket real no código.
+    Bucket S3 onde está o state remoto de oficina-mecanica-infra-k8s (mesmo bucket compartilhado
+    dos repositórios de infraestrutura). Sem default de propósito: não hardcodar nome de bucket
+    real no código.
   EOT
   type        = string
 }
@@ -17,12 +17,6 @@ variable "infra_k8s_state_key" {
   description = "Key do state remoto de oficina-mecanica-infra-k8s dentro do bucket compartilhado."
   type        = string
   default     = "infra-k8s/terraform.tfstate"
-}
-
-variable "infra_db_state_key" {
-  description = "Key do state remoto de oficina-mecanica-infra-db dentro do bucket compartilhado."
-  type        = string
-  default     = "infra-db/terraform.tfstate"
 }
 
 variable "lab_role_name" {

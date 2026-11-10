@@ -87,6 +87,31 @@ public class JwtTokenFactoryTests
     }
 
     [Fact]
+    public void GerarTokenDeServico_DeveSeguirOContratoDeChamadaAoCadastro()
+    {
+        var antes = DateTime.UtcNow;
+        var resultado = new JwtTokenFactory(Secret, Issuer, Audience).GerarTokenDeServico();
+        var token = new JwtSecurityTokenHandler().ReadJwtToken(resultado.Token);
+
+        Assert.Equal(Issuer, token.Issuer);
+        Assert.Contains(Audience, token.Audiences);
+        Assert.Equal("oficina-mecanica-lambda-auth", token.Subject);
+        Assert.Equal("Oficina", token.Claims.Single(c => c.Type == "role").Value);
+        Assert.Equal(SecurityAlgorithms.HmacSha256, token.Header.Alg);
+        Assert.True(token.ValidTo >= antes.AddMinutes(5).AddSeconds(-5));
+        Assert.True(token.ValidTo <= DateTime.UtcNow.AddMinutes(5).AddSeconds(5));
+    }
+
+    [Fact]
+    public void GerarTokenDeServico_NaoDeveIncluirClaimDeCpf()
+    {
+        var resultado = new JwtTokenFactory(Secret, Issuer, Audience).GerarTokenDeServico();
+        var token = new JwtSecurityTokenHandler().ReadJwtToken(resultado.Token);
+
+        Assert.DoesNotContain(token.Claims, c => c.Type == "cpf");
+    }
+
+    [Fact]
     public void Gerar_DeveProduzirTokenValidavelComOMesmoSegredo()
     {
         var factory = new JwtTokenFactory(Secret, Issuer, Audience);
