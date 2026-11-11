@@ -48,8 +48,11 @@ aplicação:
 CPF inválido, cliente inexistente e cliente inativo são as três respostas de erro. **Inexistente e
 inativo devolvem a mesma resposta genérica** — de propósito, para que o endpoint não vire um
 verificador de cadastro de clientes. Falha na chamada ao Cadastro (serviço fora do ar, resposta
-inesperada, timeout) **não** vira `401`: a Function falha com erro, para não mascarar um problema
-de infraestrutura como "cliente não encontrado".
+inesperada, timeout) **não** vira `401`, para não mascarar um problema de infraestrutura como
+"cliente não encontrado". Em falha do Cadastro (status não-2xx diferente de 404), timeout (10 s) ou
+segredo JWT divergente, a exceção não é tratada e quem chama recebe **500** do API Gateway
+(`{"message":"Internal Server Error"}`); as respostas 200/400/401 do contrato público continuam as
+mesmas.
 
 > **Mudança na Fase 4.** Até a Fase 3, a Function lia a tabela `cadastro.cliente` diretamente no
 > PostgreSQL, como exceção deliberada ao isolamento entre contextos registrada no
@@ -277,12 +280,25 @@ Este repositório **depende** de `oficina-mecanica-infra-k8s` (VPC, subnets, NLB
 HTTP API) já aplicado — ele lê o state dele via `terraform_remote_state`. Ordem de merge/apply:
 
 ```
-oficina-mecanica-infra-k8s → oficina-mecanica-cadastro → oficina-mecanica-lambda-auth
+oficina-mecanica-infra-k8s → oficina-mecanica-infra-db → serviço Cadastro implantado no EKS → oficina-mecanica-lambda-auth
 ```
 
-A Lambda vem depois do Cadastro porque o fluxo completo de login por CPF só é demonstrável com o
-serviço de Cadastro no ar atrás da NLB (listener `30082`) e com ao menos um cliente cadastrado.
-Esta Function não tem mais nenhuma relação com banco de dados.
+1. **`oficina-mecanica-infra-k8s`**
+   ([PR #7](https://github.com/gabrielMauad/oficina-mecanica-infra-k8s/pull/7)): cria o listener
+   `30082` da NLB e as regras de security group que a Lambda usa para chegar ao Cadastro.
+2. **`oficina-mecanica-infra-db`**
+   ([PR #7](https://github.com/gabrielMauad/oficina-mecanica-infra-db/pull/7)): remove o banco
+   único e o secret `rds/postgresql`.
+3. **Serviço Cadastro** implantado no EKS (NodePort `30082`).
+4. **Esta Lambda** (`oficina-mecanica-lambda-auth`), por último.
+
+A Lambda vem por último porque o smoke test do `deploy` precisa do Cadastro no ar: com o Cadastro
+fora, a chamada falha e a Function devolve 500.
+
+Entre o apply do `infra-db` (que remove o banco único e o secret `rds/postgresql`) e o deploy desta
+versão, a versão anterior da Lambda, que lia o banco, fica sem banco e falha. Isso é esperado. Não há
+conflito de apply entre os dois repositórios: a regra de ingress `5432` pertence ao security group do
+banco. Esta Function não tem mais nenhuma relação com banco de dados.
 
 ### Pré-requisitos de execução
 
@@ -330,8 +346,9 @@ A rota de autenticação é `POST <endpoint>/auth/cpf`.
   state do Terraform ou à configuração da function no console vê o valor em texto puro — mesmo
   nível de exposição que qualquer variável de ambiente de Lambda, mas vale registrar.
 - **O login por CPF depende de o serviço de Cadastro estar disponível.** É a contrapartida de
-  respeitar o isolamento de dados entre serviços: sem o Cadastro no ar, a Function falha com erro
-  (e não com `401`).
+  respeitar o isolamento de dados entre serviços: sem o Cadastro no ar (ou em caso de timeout de
+  10 s ou de segredo JWT divergente), a exceção não é tratada e quem chama recebe **500** do API
+  Gateway (`{"message":"Internal Server Error"}`), e não `401`.
 
 ## Decisões e pontos em aberto
 
