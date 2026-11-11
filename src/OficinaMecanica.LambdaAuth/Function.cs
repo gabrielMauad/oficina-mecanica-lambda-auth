@@ -78,13 +78,20 @@ public sealed class Function
 
     private static AuthenticationService BuildAuthenticationService()
     {
-        var connectionString = RequireEnv("DB_CONNECTION_STRING");
+        var cadastroBaseUrl = RequireEnv("CADASTRO_BASE_URL");
         var secret = RequireEnv("JWT_SECRET");
         var issuer = RequireEnv("JWT_ISSUER");
         var audience = RequireEnv("JWT_AUDIENCE");
 
-        var repository = new ClienteRepository(connectionString);
         var tokenFactory = new JwtTokenFactory(secret, issuer, audience);
+        var httpClient = new HttpClient
+        {
+            BaseAddress = new Uri(cadastroBaseUrl.TrimEnd('/') + "/"),
+            // Abaixo do timeout da Function (15s): o erro sai da chamada ao Cadastro, nao do
+            // limite da propria Lambda.
+            Timeout = TimeSpan.FromSeconds(10)
+        };
+        var repository = new ClienteHttpRepository(httpClient, tokenFactory);
         return new AuthenticationService(repository, tokenFactory);
     }
 

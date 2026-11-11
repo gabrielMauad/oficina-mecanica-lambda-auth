@@ -30,7 +30,7 @@ jobs:
       - name: Build (Release)
         run: dotnet build --configuration Release --no-restore
 
-      - name: Testes (unitarios + integracao com Testcontainers)
+      - name: Testes
         run: dotnet test --configuration Release --no-build --logger "console;verbosity=normal"
 
   # Validacao estatica do Terraform em infra/ - roda em todo PR, nao exige credenciais AWS.
@@ -142,9 +142,10 @@ jobs:
 
       # Descobre a URL da API pelo NOME (nunca endereco fixo - ela muda a cada recriacao da
       # infraestrutura) e chama a rota de autenticacao com um CPF valido porem inexistente,
-      # esperando 401. Prova que API Gateway, Lambda, VPC e conexao com o RDS funcionam de ponta
-      # a ponta, sem depender de nenhum cliente cadastrado. Um 504 aqui indica problema de rede
-      # entre a Lambda e o RDS (SG, subnet ou credencial errada), nao um problema de dado.
+      # esperando 401 (o Cadastro responde 404 e a Function traduz para 401). Prova que API Gateway,
+      # Lambda, VPC, NLB interna e servico de Cadastro funcionam de ponta a ponta, sem depender de
+      # nenhum cliente cadastrado. Um 500/504 aqui indica falha na chamada da Lambda ao Cadastro
+      # (rede, NLB, servico fora do ar ou segredo JWT divergente), nao um problema de dado.
       - name: Smoke test (POST /auth/cpf via API Gateway)
         run: |
           API_ENDPOINT=$(aws apigatewayv2 get-apis \
@@ -158,8 +159,8 @@ jobs:
 
           echo "Endpoint resolvido: $API_ENDPOINT"
 
-          # CPF com digitos verificadores validos (passa em CpfValidationTests), usado como
-          # "inexistente" em test/OficinaMecanica.LambdaAuth.IntegrationTests/ClienteRepositoryTests.cs.
+          # CPF com digitos verificadores validos (passa em CpfValidationTests) e sem cliente
+          # cadastrado.
           HTTP_STATUS=$(curl -sS -o /tmp/response.json -w "%{http_code}" \
             -X POST "$API_ENDPOINT/auth/cpf" \
             -H "Content-Type: application/json" \
@@ -170,8 +171,8 @@ jobs:
 
           if [ "$HTTP_STATUS" != "401" ]; then
             echo "FALHA: esperado 401 (cpf valido porem inexistente), recebido $HTTP_STATUS."
-            echo "504 costuma indicar problema de rede entre a Lambda e o RDS (SG/subnet/credencial)."
+            echo "500/504 costumam indicar falha na chamada da Lambda ao servico de Cadastro (NLB/SG/servico/segredo JWT)."
             exit 1
           fi
 
-          echo "OK: 401 recebido - API Gateway, Lambda, VPC e conexao com o RDS funcionando."
+          echo "OK: 401 recebido - API Gateway, Lambda, VPC e consulta ao Cadastro funcionando."
