@@ -3,11 +3,14 @@
 Function Serverless de autenticação por CPF do **Sistema de Oficina Mecânica** — Tech Challenge da
 pós-graduação em Arquitetura de Software (FIAP/SOAT).
 
-Este componente é um dos dois emissores de token do sistema (RFC-001 do repositório da aplicação):
+Este componente é um dos dois emissores de token do sistema
+([RFC-001](https://github.com/gabrielMauad/oficina-mecanica-app/blob/main/docs/arquitetura/rfcs/001-estrategia-de-autenticacao.md) do repositório da aplicação):
 recebe um CPF, valida-o, consulta o serviço de Cadastro
 ([`oficina-mecanica-cadastro`](https://github.com/gabrielMauad/oficina-mecanica-cadastro)) para
 saber se existe um cliente ativo com esse documento e, em caso positivo, emite um JWT que os
-serviços do sistema aceitam para as rotas do papel `Cliente`.
+serviços do sistema aceitam para as rotas do papel `Cliente`. A Function **não acessa banco de dados**:
+roda dentro da VPC e consulta o Cadastro por HTTP (decisão registrada no
+[ADR-011](https://github.com/gabrielMauad/oficina-mecanica-app/blob/main/docs/arquitetura/adrs/011-lambda-consulta-o-cadastro-por-http.md)).
 
 ---
 
@@ -25,19 +28,20 @@ serviços do sistema aceitam para as rotas do papel `Cliente`.
 - [Deploy](#deploy)
 - [Limitações conhecidas](#limitações-conhecidas)
 - [Decisões e pontos em aberto](#decisões-e-pontos-em-aberto)
+- [Repositórios do sistema](#repositórios-do-sistema)
 
 ---
 
 ## Propósito
 
-Implementa as três responsabilidades atribuídas à Function pelo RFC-001 do repositório da
-aplicação:
+Implementa as três responsabilidades atribuídas à Function pelo
+[RFC-001](https://github.com/gabrielMauad/oficina-mecanica-app/blob/main/docs/arquitetura/rfcs/001-estrategia-de-autenticacao.md) do repositório da aplicação:
 
 1. **Validar o CPF** — formato e dígitos verificadores, usando o mesmo pacote NuGet
    (`DocsBRValidator`) que o domínio `Cadastro` usa em `Cpf.Criar`. Isso elimina o risco de as
    duas regras divergirem.
-2. **Consultar o serviço de Cadastro por HTTP** — `GET /api/v1/clientes/documento/{cpf}`, pela NLB
-   interna. Essa rota exige o papel `Oficina`, então a Function envia um **JWT de serviço**
+2. **Consultar o serviço de Cadastro por HTTP** — `GET /api/v1/clientes/documento/{cpf}` (só os
+   dígitos), pela NLB interna na porta `30082` (o listener do Cadastro), sem passar pelo API Gateway. Essa rota exige o papel `Oficina`, então a Function envia um **JWT de serviço**
    emitido por ela mesma (`iss=oficina-mecanica-auth`, `aud=oficina-mecanica-api`,
    `sub=oficina-mecanica-lambda-auth`, `role=Oficina`, validade de 5 minutos). `404` significa
    cliente inexistente; o campo `ativo` da resposta diz se o cliente está ativo.
@@ -60,7 +64,17 @@ mesmas.
 > Na Fase 4 o Cadastro virou um microsserviço com banco próprio e vale a regra de que **nenhum
 > serviço acessa o banco de outro**. Por isso a leitura direta foi substituída pela consulta HTTP
 > ao Cadastro, que passa a ser o único dono do dado e da regra de "cliente válido". O ADR-002
-> original permanece como registro histórico da decisão da Fase 3.
+> foi substituído pelo [ADR-011](https://github.com/gabrielMauad/oficina-mecanica-app/blob/main/docs/arquitetura/adrs/011-lambda-consulta-o-cadastro-por-http.md) e
+> permanece como registro histórico da decisão da Fase 3.
+
+### Os dois tokens
+
+| Token | Para quê | Claims | Validade |
+|---|---|---|---|
+| JWT de serviço | autenticar a chamada da Function ao Cadastro (rotas do papel `Oficina`) | `iss=oficina-mecanica-auth`, `aud=oficina-mecanica-api`, `sub=oficina-mecanica-lambda-auth`, `role=Oficina` | 5 minutos |
+| JWT do cliente (resposta de `POST /auth/cpf`) | acessar as rotas do papel `Cliente` | `iss=oficina-mecanica-auth`, `aud=oficina-mecanica-api`, `sub` = id do cliente, `role=Cliente`, `cpf` (só dígitos) | 1 hora |
+
+Os dois são HS256, assinados com o segredo compartilhado (`JWT_SECRET`).
 
 ## Tecnologias utilizadas
 
@@ -233,22 +247,22 @@ Content-Type: application/json
 rota simples, documentada acima. Para o restante da API (as rotas protegidas pelo token que esta
 Function emite), o repositório `oficina-mecanica-app` publica:
 
-- A [collection Bruno](https://github.com/gabrielMauad/oficina-mecanica-app/blob/main/docs/guias/collection_bruno.yml)
-  com todos os endpoints da aplicação — inclui a rota de login da oficina (`POST /auth/login`,
-  papel `Oficina`), mas **não** inclui uma requisição para `POST /auth/cpf` desta Function (a
-  collection tem um comentário explicando como gerar manualmente um token de papel `Cliente`
-  enquanto isso).
-- **Scalar/OpenAPI** (`<endpoint>/scalar`), servido pela própria aplicação atrás do **mesmo** API
-  Gateway desta Lambda — descubra `<endpoint>` com o comando `aws apigatewayv2 get-apis` da seção
-  "Descobrir a URL de autenticação" abaixo (é o mesmo endpoint de `POST /auth/cpf`, só troca o
-  caminho).
+- As coleções [Bruno](https://github.com/gabrielMauad/oficina-mecanica-app/blob/main/docs/guias/collection_bruno.yml)
+  e [Postman](https://github.com/gabrielMauad/oficina-mecanica-app/blob/main/docs/guias/collection_postman.json)
+  com os endpoints de todos os serviços — incluem o login da oficina (`POST /api/v1/auth/login`, papel
+  `Oficina`, no serviço de Autenticação) e uma requisição para `POST /auth/cpf` desta Function
+  (somente na nuvem).
+- **OpenAPI** de cada serviço atrás do **mesmo** API Gateway desta Lambda, em
+  `<endpoint>/<serviço>/openapi/v1.json` (por exemplo, `<endpoint>/cadastro/openapi/v1.json`) —
+  descubra `<endpoint>` com o comando `aws apigatewayv2 get-apis` da seção "Descobrir a URL de
+  autenticação" abaixo (é o mesmo endpoint de `POST /auth/cpf`, só troca o caminho).
 
 ## Pipeline (CI/CD)
 
 Workflow em [`.github/workflows/ci.yml`](.github/workflows/ci.yml), GitHub Actions:
 
 - **`build-and-test`** (todo Pull Request e push): restore, build e testes (não dependem de Docker
-  nem de nenhum serviço externo). **Status check obrigatório** da branch `main`.
+  nem de nenhum serviço externo). É o status check a ser exigido na proteção da `main`; por isso o nome do job se mantém estável.
 - **`terraform-validate`** (todo Pull Request e push): `terraform fmt -check`, `terraform init
   -backend=false` e `terraform validate` em [`infra/`](infra/) — não exige credenciais AWS.
 - **`package`** (push na `main` ou `workflow_dispatch`, depende de `build-and-test`): publica a
@@ -277,7 +291,7 @@ comentários em cada arquivo de `infra/` para o desenho completo.
 ### Ordem de deploy
 
 Este repositório **depende** de `oficina-mecanica-infra-k8s` (VPC, subnets, NLB interna, a própria
-HTTP API) já aplicado — ele lê o state dele via `terraform_remote_state`. Ordem de merge/apply:
+HTTP API) já aplicado — ele lê o state dele via `terraform_remote_state`. Ordem de apply:
 
 ```
 oficina-mecanica-infra-k8s → oficina-mecanica-infra-db → serviço Cadastro implantado no EKS → oficina-mecanica-lambda-auth
@@ -355,8 +369,8 @@ A rota de autenticação é `POST <endpoint>/auth/cpf`.
 - **.NET 8, não .NET 10.** O runtime gerenciado do AWS Lambda é `dotnet8`; usar .NET 10 exigiria
   empacotar a function como imagem de contêiner ou runtime customizado, custo que não se justifica
   para este componente.
-- **Sem Dockerfile.** O runtime gerenciado do Lambda é entregue como `.zip`, não como imagem — a
-  orientação da fase é incluir `Dockerfile` só onde for tecnicamente necessário, e aqui não é.
+- **Sem Dockerfile.** O runtime gerenciado do Lambda é entregue como `.zip`, não como imagem; um
+  `Dockerfile` só se justifica onde há imagem de contêiner, e aqui não há.
 - **Consulta ao Cadastro por HTTP, não leitura do banco.** Na Fase 3 a Function lia
   `cadastro.cliente` direto (ADR-002 da aplicação, uma exceção deliberada ao isolamento entre
   contextos). Na Fase 4 essa exceção deixou de existir: com o Cadastro como microsserviço de banco
@@ -364,8 +378,20 @@ A rota de autenticação é `POST <endpoint>/auth/cpf`.
   `GET /api/v1/clientes/documento/{cpf}` do Cadastro, com um JWT de serviço (`role=Oficina`) — o
   contrato do dado passa a ser o ViewModel da API (`id`, `ativo`), e não mais o schema do banco, o
   que elimina a deriva de schema que o teste de integração com cópia do DDL tentava detectar.
-- **Fora de escopo** (por decisão explícita do RFC-001 e do enunciado da fase): endpoint de
+- **Fora de escopo** (por decisão explícita do RFC-001): endpoint de
   refresh token; cadastro de cliente; qualquer alteração nos repositórios dos serviços. A HTTP API
   em si (recurso `aws_apigatewayv2_api`) continua fora deste repositório — pertence a
   `oficina-mecanica-infra-k8s`; este repositório só acrescenta sua própria integração/rota nela
   (`infra/apigateway.tf`).
+
+## Repositórios do sistema
+
+| Repositório | Conteúdo |
+|---|---|
+| [`oficina-mecanica-app`](https://github.com/gabrielMauad/oficina-mecanica-app) | serviço OrdensServico, documentação geral (ADRs, RFCs, diagramas), coleções de requisições |
+| [`oficina-mecanica-cadastro`](https://github.com/gabrielMauad/oficina-mecanica-cadastro) | serviço Cadastro — consultado por esta Function |
+| [`oficina-mecanica-pecas-insumos`](https://github.com/gabrielMauad/oficina-mecanica-pecas-insumos) | serviço PecasInsumos |
+| [`oficina-mecanica-pagamento`](https://github.com/gabrielMauad/oficina-mecanica-pagamento) | serviço Pagamento (DynamoDB + mock do Mercado Pago) |
+| [`oficina-mecanica-autenticacao`](https://github.com/gabrielMauad/oficina-mecanica-autenticacao) | serviço Autenticação (login da oficina, sem banco) |
+| [`oficina-mecanica-infra-k8s`](https://github.com/gabrielMauad/oficina-mecanica-infra-k8s) | Terraform: EKS, NLB, API Gateway, ECR por serviço, segredo da aplicação |
+| [`oficina-mecanica-infra-db`](https://github.com/gabrielMauad/oficina-mecanica-infra-db) | Terraform: instâncias RDS PostgreSQL por serviço, tabela DynamoDB e segredos |
